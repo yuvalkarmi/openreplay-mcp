@@ -198,13 +198,25 @@ export class OpenReplayClient {
     return this.projects;
   }
 
+  // Normalize a raw filter object so the OpenReplay v1 API accepts it.
+  // The API requires `value` to be an array and `name` to be present.
+  private normalizeFilter(f: unknown): unknown {
+    if (typeof f !== "object" || f === null) return f;
+    const filter = f as Record<string, unknown>;
+    return {
+      ...filter,
+      name: filter.name ?? filter.type,
+      value: Array.isArray(filter.value) ? filter.value : filter.value !== undefined ? [filter.value] : [],
+    };
+  }
+
   async searchSessions(
     siteId: string,
     range: TimeRange,
     opts: { limit?: number; page?: number; filters?: unknown[] } = {},
   ): Promise<{ total: number; sessions: SessionSummary[] }> {
     const payload = {
-      filters: opts.filters ?? [],
+      filters: (opts.filters ?? []).map((f) => this.normalizeFilter(f)),
       startTimestamp: range.startTimestamp,
       endTimestamp: range.endTimestamp,
       startDate: range.startTimestamp,

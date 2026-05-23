@@ -184,11 +184,11 @@ server.registerTool(
   {
     title: "Top breakdown table",
     description:
-      "Top values for a dimension over the window. metricOf examples: locations (top pages), userBrowser, userOs, userCountry, userDevice, referrer.",
+      "Top values for a dimension over the window. metricOf accepted values: location (top pages), userBrowser, userOs, userCountry, userDevice, userId, referrer, fetch, jsException, screenResolution, sessions, issue.",
     inputSchema: {
       metricOf: z
         .string()
-        .describe("Dimension, e.g. locations | userBrowser | userCountry | userOs | userDevice | referrer"),
+        .describe("Dimension, e.g. location | userBrowser | userCountry | userOs | userDevice | userId | referrer | fetch | jsException | screenResolution"),
       siteId: z.string().optional(),
       hoursBack: z.number().int().positive().default(168),
       limit: z.number().int().min(1).max(200).default(20),

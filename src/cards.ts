@@ -36,8 +36,8 @@ export function timeseriesPayload(range: TimeRange, density = 24, filters: unkno
   };
 }
 
-// metricOf examples: "locations" (top pages), "userBrowser", "userOs",
-// "userCountry", "userDevice", "referrer".
+// metricOf accepted values: "location" (top pages), "userBrowser", "userOs",
+// "userCountry", "userDevice", "userId", "referrer", "fetch", "jsException", "screenResolution", "sessions", "issue".
 export function tablePayload(range: TimeRange, metricOf: string, limit = 20, filters: unknown[] = []) {
   return {
     ...range,

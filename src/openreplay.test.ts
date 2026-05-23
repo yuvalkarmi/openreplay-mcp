@@ -135,6 +135,48 @@ describe("OpenReplayClient data methods", () => {
     expect(callArg.data).toMatchObject({ startTimestamp: 100, endTimestamp: 200, limit: 5 });
   });
 
+  it("normalizeFilter: wraps string value into array and infers name from type", async () => {
+    loginOk();
+    request.mockResolvedValueOnce({ data: { data: { total: 0, sessions: [] } } });
+    const c = new OpenReplayClient({ appUrl: "https://or.example.com", email: "a@b.com", password: "pw" });
+    await c.searchSessions(
+      "1",
+      { startTimestamp: 100, endTimestamp: 200 },
+      { filters: [{ type: "userId", operator: "is", value: "some-uuid" }] },
+    );
+    const sent = request.mock.calls[0][0].data.filters[0];
+    expect(sent.name).toBe("userId");
+    expect(Array.isArray(sent.value)).toBe(true);
+    expect(sent.value).toEqual(["some-uuid"]);
+  });
+
+  it("normalizeFilter: leaves array value and explicit name untouched", async () => {
+    loginOk();
+    request.mockResolvedValueOnce({ data: { data: { total: 0, sessions: [] } } });
+    const c = new OpenReplayClient({ appUrl: "https://or.example.com", email: "a@b.com", password: "pw" });
+    await c.searchSessions(
+      "1",
+      { startTimestamp: 100, endTimestamp: 200 },
+      { filters: [{ type: "userBrowser", name: "myName", operator: "is", value: ["Chrome", "Firefox"] }] },
+    );
+    const sent = request.mock.calls[0][0].data.filters[0];
+    expect(sent.name).toBe("myName");
+    expect(sent.value).toEqual(["Chrome", "Firefox"]);
+  });
+
+  it("normalizeFilter: handles missing value with empty array", async () => {
+    loginOk();
+    request.mockResolvedValueOnce({ data: { data: { total: 0, sessions: [] } } });
+    const c = new OpenReplayClient({ appUrl: "https://or.example.com", email: "a@b.com", password: "pw" });
+    await c.searchSessions(
+      "1",
+      { startTimestamp: 100, endTimestamp: 200 },
+      { filters: [{ type: "userId", operator: "isAny" }] },
+    );
+    const sent = request.mock.calls[0][0].data.filters[0];
+    expect(sent.value).toEqual([]);
+  });
+
   it("replayUrl embeds siteId, sessionId and the jwt", async () => {
     loginOk("zzz");
     const c = new OpenReplayClient({ appUrl: "https://or.example.com", email: "a@b.com", password: "pw" });
