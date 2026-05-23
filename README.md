@@ -1,128 +1,83 @@
 # OpenReplay MCP Server
 
-An MCP (Model Context Protocol) server that provides AI-powered analytics for OpenReplay sessions. This server enables LLMs to query and analyze user sessions through OpenReplay's API.
+An MCP (Model Context Protocol) server for [OpenReplay](https://openreplay.com) session analytics. It logs into your OpenReplay dashboard with email/password, obtains a JWT, and exposes the dashboard's data API as MCP tools — sessions, events, replays, funnels, and breakdowns.
 
-## Authentication Methods
+Works against **self-hosted** instances (e.g. `https://or.your-domain.com`) and OpenReplay **SaaS** (`https://app.openreplay.com`).
 
-### API Key Authentication (Current)
-The server currently uses API key authentication which provides access to:
-- List all projects
-- Get user sessions by user ID
-- Get session events
-- User details
+> Fork of [lekt9/openreplay-mcp](https://github.com/lekt9/openreplay-mcp), rewritten to use OpenReplay's authenticated dashboard API (JWT) instead of the limited Organization-API-key endpoints, upgraded to MCP SDK 1.x, and verified end-to-end against a live instance.
 
-**Note**: API key authentication has limited access. For full functionality (session search, metrics, funnels, etc.), JWT authentication is required.
+## Tools
 
-### JWT Authentication (Future)
-Full access to all OpenReplay features including:
-- Complete session search with filters
-- Performance metrics and analytics
-- Funnel analysis
-- Error tracking and aggregation
-- Custom dashboards and metrics
+| Tool | What it does |
+|------|--------------|
+| `login` | Authenticate (email/password → JWT). Usually automatic. |
+| `auth_status` | Whether a valid JWT is held. |
+| `list_projects` | Projects with their numeric `projectId` (siteId). |
+| `search_sessions` | Recorded sessions over a window (count + summaries + replay deep links). |
+| `get_session_events` | All events for a session (locations, clicks, inputs, errors, network, perf). |
+| `get_session_replay` | Replay metadata + a deep link to watch it. |
+| `get_sessions_over_time` | Session-count timeseries. |
+| `get_top` | Top breakdown by dimension (`locations`, `userBrowser`, `userCountry`, `userOs`, `userDevice`, `referrer`). |
+| `get_funnel` | Step-by-step conversion funnel. |
 
-## Installation
+## Setup
 
 ```bash
 npm install
 npm run build
 ```
 
-## Configuration
+Configure via environment variables (see `.env.example`):
 
-1. Copy `.env.example` to `.env`:
-```bash
-cp .env.example .env
-```
+| Var | Required | Notes |
+|-----|----------|-------|
+| `OPENREPLAY_URL` | yes | Instance URL you open in the browser. Legacy `OPENREPLAY_BACKEND_URL` / `OPENREPLAY_API_URL` also accepted. |
+| `OPENREPLAY_EMAIL` | yes | Dashboard account email. |
+| `OPENREPLAY_PASSWORD` | yes | Dashboard account password. |
+| `OPENREPLAY_PROJECT_ID` | no | Default numeric siteId; otherwise pass `siteId` per call or use `list_projects`. |
 
-2. Configure your OpenReplay credentials:
-```env
-# OpenReplay API URL
-# For cloud: https://api.openreplay.com (default)
-# For self-hosted: Your instance URL
-OPENREPLAY_API_URL=https://api.openreplay.com
+The JWT is cached at `~/.openreplay-mcp/config.json` and transparently re-minted on expiry.
 
-# Organization API Key (find in Preferences > Account > Organization API Key)
-OPENREPLAY_API_KEY=your_organization_api_key
-
-# Project key from your project settings
-OPENREPLAY_PROJECT_KEY=your_project_key
-```
-
-## Usage with Claude Desktop
-
-Add to your Claude Desktop configuration (`~/Library/Application Support/Claude/claude_desktop_config.json`):
+## MCP client config
 
 ```json
 {
   "mcpServers": {
     "openreplay": {
       "command": "node",
-      "args": ["/path/to/openreplay-mcp/dist/index.js"],
+      "args": ["/absolute/path/to/openreplay-mcp/dist/index.js"],
       "env": {
-        "OPENREPLAY_API_URL": "https://api.openreplay.com",
-        "OPENREPLAY_API_KEY": "your_organization_api_key",
-        "OPENREPLAY_PROJECT_KEY": "your_project_key"
+        "OPENREPLAY_URL": "https://or.your-domain.com",
+        "OPENREPLAY_EMAIL": "you@example.com",
+        "OPENREPLAY_PASSWORD": "your_password",
+        "OPENREPLAY_PROJECT_ID": "1"
       }
     }
   }
 }
 ```
 
-## Available Tools
+## Notes
 
-### search_sessions
-Search and filter sessions with various criteria like date range, user properties, errors, performance metrics.
-
-### get_session_details
-Get detailed information about a specific session including all events, errors, network requests, console logs.
-
-### get_session_events
-Get all events from a session with optional filtering by event type.
-
-### aggregate_sessions
-Aggregate session data with various metrics and groupings (count, avg_duration, error_rate, bounce_rate, etc.).
-
-### get_user_journey
-Get the complete journey of a user across multiple sessions.
-
-### get_errors_issues
-Get errors and issues with their impact and affected sessions.
-
-### get_funnel_analysis
-Analyze user funnels and conversion paths with custom step definitions.
-
-### get_performance_metrics
-Get performance metrics like page load times, LCP, TTI with percentiles.
-
-### execute_custom_query
-Execute custom queries for advanced analysis (SQL-like syntax for ClickHouse).
-
-## Example Queries
-
-Once connected, you can ask the LLM questions like:
-
-- "What are the most common drop-off points in our checkout flow?"
-- "Show me the longest user sessions from the last week"
-- "What JavaScript errors are affecting the most users?"
-- "Analyze the user journey for users who converted vs those who didn't"
-- "What pages have the worst performance metrics?"
-- "Find patterns in sessions that resulted in errors"
-- "Show me the bounce rate by device type and country"
+- **Self-hosted vs SaaS paths.** The dashboard API lives at `{host}/api/...` on self-hosted and `api.openreplay.com/...` on SaaS; the server derives this from `OPENREPLAY_URL`.
+- **Web vitals / performance** are intentionally not exposed: the `webVital` metric returns HTTP 500 on the self-hosted v1.x API tested, and performance timeseries are not supported there (`metricOf` is limited to `sessionCount`/`userCount`/`eventCount`).
+- Credentials live only in env and the local JWT cache; nothing is sent anywhere except your OpenReplay instance.
 
 ## Development
 
 ```bash
-# Run in development mode
-npm run dev
-
-# Build for production
-npm run build
-
-# Start production server
-npm start
+npm run build      # compile to dist/
+npm test           # run the vitest suite
+npm run test:watch # watch mode
+npm run dev        # run from source with tsx (watch)
 ```
+
+Tests cover URL derivation, the metric-card payload builders, and the auth/request client (login, transparent re-auth on 401, project/session parsing) with mocked network and filesystem.
+
+## Credits
+
+Originally created by [lekt9](https://github.com/lekt9/openreplay-mcp). This fork rewrites it onto OpenReplay's authenticated dashboard API, upgrades to MCP SDK 1.x, and adds a test suite. The original commit history is preserved.
 
 ## License
 
-MIT
+[MIT](LICENSE) — © 2025 lekt9 and contributors.

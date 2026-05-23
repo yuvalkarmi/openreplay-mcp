@@ -1,498 +1,245 @@
 #!/usr/bin/env node
-import { Server } from "@modelcontextprotocol/sdk/server/index.js";
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import {
-  CallToolRequestSchema,
-  ListToolsRequestSchema,
-  ErrorCode,
-  McpError,
-} from "@modelcontextprotocol/sdk/types.js";
-import axios, { AxiosInstance } from "axios";
 import { z } from "zod";
-import dotenv from "dotenv";
+import { OpenReplayClient, AuthError, rangeFromHours } from "./openreplay.js";
+import { timeseriesPayload, tablePayload, funnelPayload } from "./cards.js";
 
-dotenv.config();
+// stdout is reserved for JSON-RPC framing; route stray console output to stderr.
+console.log = console.error;
 
-// Configuration
-const OPENREPLAY_API_URL = process.env.OPENREPLAY_API_URL || "https://api.openreplay.com";
-const OPENREPLAY_API_KEY = process.env.OPENREPLAY_API_KEY || "";
-const OPENREPLAY_PROJECT_KEY = process.env.OPENREPLAY_PROJECT_KEY || process.env.OPENREPLAY_PROJECT_ID || "";
-
-class OpenReplayMCP {
-  private server: Server;
-  private api: AxiosInstance;
-
-  constructor() {
-    this.server = new Server(
-      {
-        name: "openreplay-mcp",
-        version: "0.1.0",
-      },
-      {
-        capabilities: {
-          tools: {},
-        },
-      }
-    );
-
-    // Initialize API client
-    this.api = axios.create({
-      baseURL: OPENREPLAY_API_URL,
-      headers: {
-        "Authorization": OPENREPLAY_API_KEY,
-        "Content-Type": "application/json",
-      },
-    });
-
-    this.setupHandlers();
-  }
-
-  private setupHandlers() {
-    // List available tools
-    this.server.setRequestHandler(ListToolsRequestSchema, async () => ({
-      tools: [
-        {
-          name: "list_projects",
-          description: "Get list of all projects in the organization",
-          inputSchema: {
-            type: "object",
-            properties: {},
-            required: []
-          }
-        },
-        {
-          name: "get_user_sessions",
-          description: "Get sessions for a specific user ID (API key authentication supported)",
-          inputSchema: {
-            type: "object",
-            properties: {
-              userId: { type: "string", description: "The user ID to get sessions for" },
-              startDate: { type: "string", description: "Start date in ISO format" },
-              endDate: { type: "string", description: "End date in ISO format" }
-            },
-            required: ["userId"]
-          }
-        },
-        {
-          name: "search_sessions",
-          description: "[Requires userId with API key auth] Search and filter sessions. Full search requires JWT authentication.",
-          inputSchema: {
-            type: "object",
-            properties: {
-              userId: { type: "string", description: "Required: User ID to search sessions for" },
-              startDate: { type: "string", description: "Start date in ISO format" },
-              endDate: { type: "string", description: "End date in ISO format" },
-              filters: {
-                type: "array",
-                description: "Filters (limited with API key auth)",
-                items: {
-                  type: "object",
-                  properties: {
-                    type: { type: "string", description: "Filter type" },
-                    operator: { type: "string", description: "Operator" },
-                    value: { type: ["string", "number", "array"], description: "Filter value" }
-                  }
-                }
-              },
-              limit: { type: "number", description: "Number of sessions to return" },
-              offset: { type: "number", description: "Offset for pagination" },
-              sort: {
-                type: "object",
-                properties: {
-                  field: { type: "string", description: "Field to sort by" },
-                  order: { type: "string", enum: ["asc", "desc"], description: "Sort order" }
-                }
-              }
-            },
-            required: []
-          }
-        },
-        {
-          name: "get_session_details",
-          description: "Get detailed information about a specific session including all events, errors, network requests, console logs, custom events, and performance metrics",
-          inputSchema: {
-            type: "object",
-            properties: {
-              sessionId: { type: "string", description: "The session ID to retrieve" }
-            },
-            required: ["sessionId"]
-          }
-        },
-        {
-          name: "get_session_events",
-          description: "Get all events from a session with optional filtering by event type",
-          inputSchema: {
-            type: "object",
-            properties: {
-              sessionId: { type: "string", description: "The session ID" },
-              eventTypes: {
-                type: "array",
-                items: { type: "string" },
-                description: "Filter by specific event types (CLICK, INPUT, LOCATION, CUSTOM, ERROR, etc.)"
-              },
-              startTime: { type: "number", description: "Start timestamp (ms)" },
-              endTime: { type: "number", description: "End timestamp (ms)" }
-            },
-            required: ["sessionId"]
-          }
-        },
-        {
-          name: "aggregate_sessions",
-          description: "Aggregate session data with various metrics and groupings",
-          inputSchema: {
-            type: "object",
-            properties: {
-              startDate: { type: "string", description: "Start date in ISO format" },
-              endDate: { type: "string", description: "End date in ISO format" },
-              metrics: {
-                type: "array",
-                description: "Metrics to calculate",
-                items: {
-                  type: "string",
-                  enum: ["count", "avg_duration", "error_rate", "bounce_rate", "unique_users", "page_views"]
-                }
-              },
-              groupBy: {
-                type: "array",
-                description: "Fields to group by",
-                items: {
-                  type: "string",
-                  enum: ["hour", "day", "week", "browser", "device", "country", "page", "error_type"]
-                }
-              },
-              filters: { type: "array", description: "Same filter format as search_sessions" }
-            },
-            required: ["metrics"]
-          }
-        },
-        {
-          name: "get_user_journey",
-          description: "Get the complete journey of a user across multiple sessions",
-          inputSchema: {
-            type: "object",
-            properties: {
-              userId: { type: "string", description: "User ID or anonymous ID" },
-              startDate: { type: "string", description: "Start date in ISO format" },
-              endDate: { type: "string", description: "End date in ISO format" },
-              includeEvents: { type: "boolean", description: "Include detailed events (default false)" }
-            },
-            required: ["userId"]
-          }
-        },
-        {
-          name: "get_errors_issues",
-          description: "Get errors and issues with their impact and affected sessions",
-          inputSchema: {
-            type: "object",
-            properties: {
-              startDate: { type: "string", description: "Start date in ISO format" },
-              endDate: { type: "string", description: "End date in ISO format" },
-              errorTypes: {
-                type: "array",
-                items: { type: "string" },
-                description: "Filter by error types (js_exception, missing_resource, etc.)"
-              },
-              minOccurrences: { type: "number", description: "Minimum number of occurrences" },
-              groupBy: { type: "string", enum: ["message", "stack", "url"], description: "How to group errors" }
-            }
-          }
-        },
-        {
-          name: "get_funnel_analysis",
-          description: "Analyze user funnels and conversion paths",
-          inputSchema: {
-            type: "object",
-            properties: {
-              steps: {
-                type: "array",
-                description: "Funnel steps in order",
-                items: {
-                  type: "object",
-                  properties: {
-                    name: { type: "string", description: "Step name" },
-                    eventType: { type: "string", description: "Event type (LOCATION, CLICK, CUSTOM)" },
-                    eventValue: { type: "string", description: "Event value to match" }
-                  }
-                }
-              },
-              startDate: { type: "string", description: "Start date in ISO format" },
-              endDate: { type: "string", description: "End date in ISO format" },
-              filters: { type: "array", description: "Additional filters" }
-            },
-            required: ["steps"]
-          }
-        },
-        {
-          name: "get_performance_metrics",
-          description: "Get performance metrics like page load times, largest contentful paint, time to interactive, etc.",
-          inputSchema: {
-            type: "object",
-            properties: {
-              startDate: { type: "string", description: "Start date in ISO format" },
-              endDate: { type: "string", description: "End date in ISO format" },
-              metrics: {
-                type: "array",
-                items: {
-                  type: "string",
-                  enum: ["load_time", "dom_complete", "first_paint", "first_contentful_paint", "largest_contentful_paint", "time_to_interactive", "cpu_load", "memory_usage"]
-                }
-              },
-              groupBy: {
-                type: "array",
-                items: { type: "string", enum: ["page", "browser", "device", "country"] }
-              },
-              percentiles: {
-                type: "array",
-                items: { type: "number" },
-                description: "Percentiles to calculate (e.g., [50, 75, 90, 95, 99])"
-              }
-            },
-            required: ["metrics"]
-          }
-        },
-        {
-          name: "execute_custom_query",
-          description: "Execute a custom query on the session data (supports SQL-like syntax for ClickHouse)",
-          inputSchema: {
-            type: "object",
-            properties: {
-              query: { type: "string", description: "Custom query to execute" },
-              parameters: { type: "object", description: "Query parameters" }
-            },
-            required: ["query"]
-          }
-        }
-      ],
-    }));
-
-    // Handle tool calls
-    this.server.setRequestHandler(CallToolRequestSchema, async (request) => {
-      const { name, arguments: args } = request.params;
-
-      try {
-        switch (name) {
-          case "list_projects":
-            return await this.listProjects();
-          case "get_user_sessions":
-            return await this.getUserSessions(args);
-          case "search_sessions":
-            return await this.searchSessions(args);
-          case "get_session_details":
-            return await this.getSessionDetails(args);
-          case "get_session_events":
-            return await this.getSessionEvents(args);
-          case "aggregate_sessions":
-            return await this.aggregateSessions(args);
-          case "get_user_journey":
-            return await this.getUserJourney(args);
-          case "get_errors_issues":
-            return await this.getErrorsIssues(args);
-          case "get_funnel_analysis":
-            return await this.getFunnelAnalysis(args);
-          case "get_performance_metrics":
-            return await this.getPerformanceMetrics(args);
-          case "execute_custom_query":
-            return await this.executeCustomQuery(args);
-          default:
-            throw new McpError(ErrorCode.MethodNotFound, `Unknown tool: ${name}`);
-        }
-      } catch (error: any) {
-        if (error instanceof McpError) throw error;
-        
-        return {
-          content: [
-            {
-              type: "text",
-              text: `Error: ${error.message || "Unknown error occurred"}`,
-            },
-          ],
-        };
-      }
-    });
-  }
-
-  private async listProjects() {
-    const response = await this.api.get(`/api/v1/projects`);
-
-    return {
-      content: [
-        {
-          type: "text",
-          text: JSON.stringify(response.data, null, 2),
-        },
-      ],
-    };
-  }
-
-  private async getUserSessions(args: any) {
-    const { userId, startDate, endDate } = args;
-    const response = await this.api.get(`/api/v1/${OPENREPLAY_PROJECT_KEY}/users/${userId}/sessions`, {
-      params: {
-        start_date: startDate ? new Date(startDate).getTime() : undefined,
-        end_date: endDate ? new Date(endDate).getTime() : undefined
-      }
-    });
-
-    return {
-      content: [
-        {
-          type: "text",
-          text: JSON.stringify(response.data, null, 2),
-        },
-      ],
-    };
-  }
-
-  private async searchSessions(args: any) {
-    // Note: The v1 API with API keys has limited endpoints
-    // For full session search, JWT authentication is required
-    // This uses the user sessions endpoint as an alternative
-    if (!args.userId) {
-      return {
-        content: [
-          {
-            type: "text",
-            text: "Session search requires a userId when using API key authentication. For full search capabilities, JWT authentication is needed.",
-          },
-        ],
-      };
-    }
-    
-    const response = await this.api.get(`/api/v1/${OPENREPLAY_PROJECT_KEY}/users/${args.userId}/sessions`, {
-      params: {
-        start_date: args.startDate ? new Date(args.startDate).getTime() : Date.now() - 7 * 24 * 60 * 60 * 1000,
-        end_date: args.endDate ? new Date(args.endDate).getTime() : Date.now()
-      }
-    });
-
-    return {
-      content: [
-        {
-          type: "text",
-          text: JSON.stringify(response.data, null, 2),
-        },
-      ],
-    };
-  }
-
-  private async getSessionDetails(args: any) {
-    const { sessionId } = args;
-    // Session replay details not available via v1 API
-    // Only events are available
-    return {
-      content: [
-        {
-          type: "text",
-          text: "Session replay details are not available via API key authentication. Use get_session_events instead or use JWT authentication for full access.",
-        },
-      ],
-    };
-  }
-
-  private async getSessionEvents(args: any) {
-    const { sessionId } = args;
-    const response = await this.api.get(`/api/v1/${OPENREPLAY_PROJECT_KEY}/sessions/${sessionId}/events`);
-
-    return {
-      content: [
-        {
-          type: "text",
-          text: JSON.stringify(response.data, null, 2),
-        },
-      ],
-    };
-  }
-
-  private async aggregateSessions(args: any) {
-    // Aggregation requires access to the full sessions/search endpoint
-    // which is not available via API key authentication
-    return {
-      content: [
-        {
-          type: "text",
-          text: "Session aggregation is not available via API key authentication. You can retrieve individual user sessions instead.",
-        },
-      ],
-    };
-  }
-
-  private async getUserJourney(args: any) {
-    const { userId, startDate, endDate } = args;
-    // Use the v1 API user sessions endpoint
-    const response = await this.api.get(`/api/v1/${OPENREPLAY_PROJECT_KEY}/users/${userId}/sessions`, {
-      params: {
-        start_date: startDate ? new Date(startDate).getTime() : Date.now() - 30 * 24 * 60 * 60 * 1000,
-        end_date: endDate ? new Date(endDate).getTime() : Date.now()
-      }
-    });
-
-    return {
-      content: [
-        {
-          type: "text",
-          text: JSON.stringify(response.data, null, 2),
-        },
-      ],
-    };
-  }
-
-  private async getErrorsIssues(args: any) {
-    // Error analysis requires JWT authentication
-    return {
-      content: [
-        {
-          type: "text",
-          text: "Error analysis is not available via API key authentication. JWT authentication is required for this feature.",
-        },
-      ],
-    };
-  }
-
-  private async getFunnelAnalysis(args: any) {
-    // Funnel analysis requires JWT authentication
-    return {
-      content: [
-        {
-          type: "text",
-          text: "Funnel analysis is not available via API key authentication. JWT authentication is required for this feature.",
-        },
-      ],
-    };
-  }
-
-  private async getPerformanceMetrics(args: any) {
-    // Performance metrics require JWT authentication
-    return {
-      content: [
-        {
-          type: "text",
-          text: "Performance metrics are not available via API key authentication. JWT authentication is required for this feature.",
-        },
-      ],
-    };
-  }
-
-  private async executeCustomQuery(args: any) {
-    // OpenReplay doesn't expose direct query access, but we can use the search with complex filters
-    const { query, parameters } = args;
-    
-    return {
-      content: [
-        {
-          type: "text",
-          text: "Custom queries are not directly supported. Please use the specific search and filter tools instead.",
-        },
-      ],
-    };
-  }
-
-  async run() {
-    const transport = new StdioServerTransport();
-    await this.server.connect(transport);
-    console.error("OpenReplay MCP Server running on stdio");
-  }
+// dotenv is a dev convenience for local .env files; MCP hosts inject env directly.
+// quiet: true suppresses dotenv v17's stdout banner, which would corrupt the stream.
+try {
+  (await import("dotenv")).config({ quiet: true });
+} catch {
+  // dotenv not installed — env comes from the host
 }
 
-// Main
-const server = new OpenReplayMCP();
-server.run().catch(console.error);
+const APP_URL =
+  process.env.OPENREPLAY_URL ||
+  process.env.OPENREPLAY_BACKEND_URL ||
+  process.env.OPENREPLAY_API_URL ||
+  "https://app.openreplay.com";
+const DEFAULT_PROJECT_ID = process.env.OPENREPLAY_PROJECT_ID || "";
+
+const client = new OpenReplayClient({
+  appUrl: APP_URL,
+  email: process.env.OPENREPLAY_EMAIL,
+  password: process.env.OPENREPLAY_PASSWORD,
+});
+
+function resolveSiteId(siteId?: string): string {
+  const id = siteId || DEFAULT_PROJECT_ID;
+  if (!id) {
+    throw new Error(
+      "No project id. Pass siteId, or set OPENREPLAY_PROJECT_ID. Call list_projects to discover ids.",
+    );
+  }
+  return id;
+}
+
+type ToolResult = { content: Array<{ type: "text"; text: string }>; isError?: boolean };
+
+function json(value: unknown): ToolResult {
+  return { content: [{ type: "text", text: JSON.stringify(value, null, 2) }] };
+}
+
+// Wrap a tool body so auth/API errors surface as readable tool errors, not crashes.
+function tool(fn: () => Promise<ToolResult>): Promise<ToolResult> {
+  return fn().catch((err) => {
+    const msg = err instanceof Error ? err.message : String(err);
+    const hint =
+      err instanceof AuthError
+        ? " (set OPENREPLAY_EMAIL / OPENREPLAY_PASSWORD or call the login tool)"
+        : "";
+    return { content: [{ type: "text", text: `Error: ${msg}${hint}` }], isError: true };
+  });
+}
+
+const server = new McpServer({ name: "openreplay-mcp", version: "0.2.0" });
+
+server.registerTool(
+  "login",
+  {
+    title: "Log in to OpenReplay",
+    description:
+      "Authenticate against OpenReplay with email/password to obtain a JWT. Uses OPENREPLAY_EMAIL/OPENREPLAY_PASSWORD if args are omitted. The JWT is cached, so this is usually automatic.",
+    inputSchema: {
+      email: z.string().optional().describe("Account email (defaults to OPENREPLAY_EMAIL)"),
+      password: z.string().optional().describe("Account password (defaults to OPENREPLAY_PASSWORD)"),
+    },
+  },
+  ({ email, password }) =>
+    tool(async () => {
+      const user = await client.login(email, password);
+      return json({ authenticated: true, instance: client.appUrl, user });
+    }),
+);
+
+server.registerTool(
+  "auth_status",
+  {
+    title: "Check auth status",
+    description: "Report whether the server currently holds a valid OpenReplay JWT.",
+    inputSchema: {},
+  },
+  () => tool(async () => json({ authenticated: client.isAuthenticated(), instance: client.appUrl })),
+);
+
+server.registerTool(
+  "list_projects",
+  {
+    title: "List projects",
+    description:
+      "List OpenReplay projects (sites) in the organization with their numeric projectId (siteId) and name.",
+    inputSchema: {},
+  },
+  () => tool(async () => json(await client.listProjects())),
+);
+
+server.registerTool(
+  "search_sessions",
+  {
+    title: "Search sessions",
+    description:
+      "Search recorded sessions for a project over a time window. Returns total count and session summaries (sessionId, duration, user, browser, country, errors). Pass raw OpenReplay filter objects via `filters` for advanced filtering.",
+    inputSchema: {
+      siteId: z.string().optional().describe("Project id (defaults to OPENREPLAY_PROJECT_ID)"),
+      hoursBack: z.number().int().positive().default(24).describe("Lookback window in hours"),
+      limit: z.number().int().min(1).max(200).default(10),
+      page: z.number().int().min(1).default(1),
+      filters: z.array(z.unknown()).optional().describe("Raw OpenReplay filter objects"),
+    },
+  },
+  ({ siteId, hoursBack, limit, page, filters }) =>
+    tool(async () => {
+      const id = resolveSiteId(siteId);
+      const result = await client.searchSessions(id, rangeFromHours(hoursBack), { limit, page, filters });
+      return json({
+        total: result.total,
+        returned: result.sessions.length,
+        sessions: result.sessions.map((s) => ({
+          ...s,
+          replayUrl: client.replayUrl(id, s.sessionId),
+        })),
+      });
+    }),
+);
+
+server.registerTool(
+  "get_session_events",
+  {
+    title: "Get session events",
+    description:
+      "Get all events for a single session: page locations, clicks, inputs, errors, network requests, performance and custom events.",
+    inputSchema: {
+      sessionId: z.string().describe("The session id"),
+      siteId: z.string().optional().describe("Project id (defaults to OPENREPLAY_PROJECT_ID)"),
+    },
+  },
+  ({ sessionId, siteId }) =>
+    tool(async () => json(await client.getSessionEvents(resolveSiteId(siteId), sessionId))),
+);
+
+server.registerTool(
+  "get_session_replay",
+  {
+    title: "Get session replay metadata",
+    description:
+      "Get replay metadata for a session (duration, user, device, tracker version) plus a deep link to watch the replay in the OpenReplay dashboard.",
+    inputSchema: {
+      sessionId: z.string().describe("The session id"),
+      siteId: z.string().optional().describe("Project id (defaults to OPENREPLAY_PROJECT_ID)"),
+    },
+  },
+  ({ sessionId, siteId }) =>
+    tool(async () => {
+      const id = resolveSiteId(siteId);
+      const data = await client.getSessionReplay(id, sessionId);
+      return json({ replayUrl: client.replayUrl(id, sessionId), session: data });
+    }),
+);
+
+server.registerTool(
+  "get_sessions_over_time",
+  {
+    title: "Sessions over time",
+    description: "Timeseries of session counts bucketed across the lookback window.",
+    inputSchema: {
+      siteId: z.string().optional(),
+      hoursBack: z.number().int().positive().default(168),
+      density: z.number().int().min(1).max(120).default(24).describe("Number of buckets"),
+    },
+  },
+  ({ siteId, hoursBack, density }) =>
+    tool(async () => {
+      const id = resolveSiteId(siteId);
+      return json(await client.card(id, timeseriesPayload(rangeFromHours(hoursBack), density)));
+    }),
+);
+
+server.registerTool(
+  "get_top",
+  {
+    title: "Top breakdown table",
+    description:
+      "Top values for a dimension over the window. metricOf examples: locations (top pages), userBrowser, userOs, userCountry, userDevice, referrer.",
+    inputSchema: {
+      metricOf: z
+        .string()
+        .describe("Dimension, e.g. locations | userBrowser | userCountry | userOs | userDevice | referrer"),
+      siteId: z.string().optional(),
+      hoursBack: z.number().int().positive().default(168),
+      limit: z.number().int().min(1).max(200).default(20),
+    },
+  },
+  ({ metricOf, siteId, hoursBack, limit }) =>
+    tool(async () => {
+      const id = resolveSiteId(siteId);
+      return json(await client.card(id, tablePayload(rangeFromHours(hoursBack), metricOf, limit)));
+    }),
+);
+
+server.registerTool(
+  "get_funnel",
+  {
+    title: "Funnel analysis",
+    description:
+      "Step-by-step conversion funnel. Each step is either a URL path string (shorthand for a LOCATION step) or an object {type, value, operator} for event types like CLICK, INPUT, CUSTOM.",
+    inputSchema: {
+      steps: z
+        .array(
+          z.union([
+            z.string(),
+            z.object({
+              type: z.string(),
+              value: z.string().optional(),
+              operator: z.string().optional(),
+            }),
+          ]),
+        )
+        .min(2)
+        .describe("Ordered funnel steps (>= 2)"),
+      siteId: z.string().optional(),
+      hoursBack: z.number().int().positive().default(168),
+    },
+  },
+  ({ steps, siteId, hoursBack }) =>
+    tool(async () => {
+      const id = resolveSiteId(siteId);
+      return json(await client.card(id, funnelPayload(rangeFromHours(hoursBack), steps)));
+    }),
+);
+
+async function main() {
+  await client.loadPersisted();
+  const transport = new StdioServerTransport();
+  await server.connect(transport);
+  console.error(`OpenReplay MCP server running on stdio (instance: ${client.appUrl})`);
+}
+
+main().catch((err) => {
+  console.error("Fatal:", err);
+  process.exit(1);
+});
